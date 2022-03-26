@@ -108,6 +108,8 @@ INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) 
 INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,300,'CZK','HKD');
 INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,200,'GBP','AUD');
 
+UPDATE fx_transaction SET deferred = TRUE WHERE transaction_id = 16;
+
 
 CREATE OR REPLACE VIEW fx_table AS
 SELECT currency,pair,buy,sell,date,CONCAT(currency,pair) AS currency_pair
@@ -192,9 +194,26 @@ CREATE TRIGGER insert_fx_conversion
 
 CREATE OR REPLACE VIEW e1_accounts AS
 SELECT
+    currency_from AS currency,
     SUM(transaction_amount) AS cash,
     SUM(-amount_to_convert) AS customer_liability,
-    SUM(-fee) AS revenue,
-    currency_from AS currency
+    SUM(CASE deferred
+        WHEN 'FALSE' THEN -fee
+        END) AS revenue,
+    SUM(CASE deferred
+        WHEN 'TRUE' THEN -fee
+        END) AS intercompany_payable
 FROM fx_transaction
 GROUP BY currency_from;
+
+CREATE OR REPLACE VIEW e2_accounts AS
+SELECT
+    currency,
+    cash,
+    customer_liability,
+    revenue,
+    intercompany_payable,
+    -intercompany_payable AS intercompany_receivable
+FROM e1_accounts;
+
+
