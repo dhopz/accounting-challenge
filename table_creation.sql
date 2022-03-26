@@ -47,13 +47,15 @@ CREATE TABLE fx_transaction (
     converted DECIMAL NOT NULL,
     rate DECIMAL NOT NULL,
     currency_from VARCHAR (3) NOT NULL,
-    currency_to VARCHAR (3) NOT NULL
+    currency_to VARCHAR (3) NOT NULL,
+    deferred BOOLEAN DEFAULT FALSE,
 );
 
 CREATE TABLE currencies (
     id SERIAL PRIMARY KEY,
     currency VARCHAR (3),
-    name VARCHAR (20)
+    name VARCHAR (20),
+    fee DECIMAL,
 );
 
 CREATE TABLE currency_rate (
@@ -71,11 +73,6 @@ CREATE TABLE customer (
     id SERIAL PRIMARY KEY,
     name VARCHAR (20)
 );
-
-CREATE TRIGGER post_transaction
-    AFTER UPDATE ON transactions
-    FOR EACH ROW
-    EXECUTE PROCEDURE check_account_update();
 
 -- how to deal with reversals, probably an update trigger and a query
 -- how to deal with revaluation, possible an update trigger
@@ -98,57 +95,106 @@ INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'AUD',1.7554);
 INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'CZK',29.539);
 INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'HKD',10.331);
 INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'USD',1.3175);
+INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'HKD',10.3365);
+INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'USD',1.2631);
+INSERT INTO currency_rate (currency_id,pair,buy) VALUES (3,'USD',1.2631);
+INSERT INTO currency_rate (currency_id,pair,buy) VALUES (5,'HKD',1.7241);
+INSERT INTO currency_rate (currency_id,pair,buy) VALUES (1,'AUD',1.5384);
+
+
+INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,200,'GBP','USD');
+INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,100,'GBP','HKD');
+INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,100,'EUR','USD');
+INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,300,'CZK','HKD');
+INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,200,'GBP','AUD');
+
 
 CREATE OR REPLACE VIEW fx_table AS
 SELECT currency,pair,buy,sell,date,CONCAT(currency,pair) AS currency_pair
 FROM currency_rate 
 INNER JOIN currencies ON currencies.id = currency_rate.currency_id;
 
-SELECT * FROM fx_table;
+CREATE OR REPLACE VIEW cust_tran AS
+SELECT 
+t1.customer_id,
+t1.amount,
+t3.fee,
+t1.amount - t3.fee AS amount_to_convert,
+(t1.amount - t3.fee) * t2.buy AS converted,
+t2.buy AS buy_rate,
+t1.currency_from,
+t1.currency_to
+FROM
+    (SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction ORDER BY date DESC LIMIT 1) t1
+LEFT JOIN 
+    (SELECT buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+ON (t2.currency_pair = t1.currency_pair)
+LEFT JOIN
+    currencies t3
+ON (t1.currency_from = t3.currency)
+ORDER BY date DESC LIMIT 1;
 
-SELECT * FROM fx_table 
-WHERE currency = 'GBP' AND pair = 'USD'
-ORDER BY date 
-DESC LIMIT 1;
-
-INSERT INTO customer_transaction (customer_id,amount,currency_from,currency_to) VALUES (1,100,'GBP','USD');
-INSERT INTO fx_transaction(customer_id,transaction_amount,amount_to_convert,converted,rate,currency_from,currency_to) VALUES(1,100,95,120,1.3198,'GBP','USD');
-
-transaction_amount DECIMAL NOT NULL,
-    amount_to_convert DECIMAL NOT NULL,
-    converted DEC
 
 
-CREATE OR REPLACE FUNCTION convert_fx() RETURNS TRIGGER AS
+INSERT INTO
+fx_transaction(
+    customer_id,
+    transaction_amount,
+    fee,
+    amount_to_convert,
+    converted,
+    rate,
+    currency_from,
+    currency_to) 
+SELECT 
+t1.customer_id,
+t1.amount,
+t3.fee,
+t1.amount - t3.fee AS amount_to_convert,
+(t1.amount - t3.fee) * t2.buy AS converted,
+t2.buy AS buy_rate,
+t1.currency_from,
+t1.currency_to
+FROM
+    (SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction ORDER BY date DESC LIMIT 1) t1
+LEFT JOIN 
+    (SELECT buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+ON (t2.currency_pair = t1.currency_pair)
+LEFT JOIN
+    currencies t3
+ON (t1.currency_from = t3.currency)
+ORDER BY date DESC LIMIT 1;
+
+CREATE OR REPLACE FUNCTION fx_conversion() RETURNS TRIGGER AS
 $BODY$
 BEGIN
-    INSERT INTO
-        fx_transaction(customer_id,converted_funds,rate,currency_from,currency_to)
-        VALUES(new.id,new.name);
-
-           RETURN new;
+    INSERT INTO fx_transaction(transaction_id,customer_id,transaction_amount,fee,amount_to_convert,converted,rate,currency_from,currency_to) 
+SELECT 
+t1.id,t1.customer_id,t1.amount,t3.fee,t1.amount - t3.fee AS amount_to_convert,(t1.amount - t3.fee) * t2.buy AS converted,t2.buy AS buy_rate,t1.currency_from,t1.currency_to
+FROM
+    (SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction ORDER BY date DESC LIMIT 1) t1
+LEFT JOIN 
+    (SELECT buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+ON (t2.currency_pair = t1.currency_pair)
+LEFT JOIN
+    currencies t3
+ON (t1.currency_from = t3.currency)
+ORDER BY date DESC LIMIT 1;
+RETURN new;
 END;
 $BODY$
 language plpgsql;
 
-WITH buy_rate as (
-    SELECT * FROM fx_table 
-    WHERE currency = 'GBP' AND pair = 'USD'
-    ORDER BY date 
-    DESC LIMIT 1),
-select * from table_3 where column_1 = (select value_1 from v1) 
-and column_2 = (select value_2 from v2);
+CREATE TRIGGER insert_fx_conversion
+     AFTER INSERT ON customer_transaction
+     FOR EACH ROW
+     EXECUTE PROCEDURE fx_conversion();
 
-
-SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction;
-
-SELECT * FROM fx_table 
-ORDER BY date 
-DESC LIMIT 1;
-
-SELECT *,customer_id,amount,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction t1
-INNER JOIN (
-    SELECT * FROM fx_table 
-    ORDER BY date 
-    DESC LIMIT 1) t2 
-ON t2.currency_pair = t2.currency_pair;
+CREATE OR REPLACE VIEW e1_accounts AS
+SELECT
+    SUM(transaction_amount) AS cash,
+    SUM(-amount_to_convert) AS customer_liability,
+    SUM(-fee) AS revenue,
+    currency_from AS currency
+FROM fx_transaction
+GROUP BY currency_from;
