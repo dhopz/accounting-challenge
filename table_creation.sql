@@ -1,30 +1,3 @@
-CREATE TABLE E1_accounts (
-    unique_id TEXT NOT NULL DEFAULT 'PREFIX'||to_char(nextval('my_prefixed_seq'::regclass), 'A'), 
-    cash DECIMAL,
-    customer_liability DECIMAL,
-    revenue DECIMAL,
-    intercompany_payable DECIMAL,
-    intercompany_receivable DECIMAL,
-    unrealized_fx DECIMAL,
-    currency VARCHAR (15),
-    );
-
-CREATE TABLE E2_accounts (
-    unique_id TEXT NOT NULL DEFAULT 'PREFIX'||to_char(nextval('my_prefixed_seq'::regclass), 'A'), 
-    cash DECIMAL,
-    customer_liability DECIMAL,
-    revenue DECIMAL,
-    intercompany_payable DECIMAL,
-    intercompany_receivable DECIMAL,
-    unrealized_fx DECIMAL,
-    currency VARCHAR (15),
-    );
-
-CREATE TABLE entities (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR (50)
-)
-
 CREATE TABLE customer_transaction (
     id SERIAL PRIMARY KEY,
     customer_id INTEGER,
@@ -32,6 +5,7 @@ CREATE TABLE customer_transaction (
     amount DECIMAL NOT NULL,
     currency_from VARCHAR (3) NOT NULL,
     currency_to VARCHAR (3) NOT NULL,
+    pair VARCHAR(6) GENERATED ALWAYS AS (currency_from || currency_to) STORED,
     FOREIGN KEY (customer_id)
         REFERENCES customer (id)   
 );
@@ -40,6 +14,7 @@ CREATE TABLE fx_transaction (
     id SERIAL PRIMARY KEY,
     customer_id INTEGER,
     transaction_id SERIAL,
+    currency_rate_id SERIAL,
     date TIMESTAMP NOT NULL DEFAULT NOW(),
     fee DECIMAL NOT NULL DEFAULT 5,
     transaction_amount DECIMAL NOT NULL,
@@ -48,8 +23,12 @@ CREATE TABLE fx_transaction (
     rate DECIMAL NOT NULL,
     currency_from VARCHAR (3) NOT NULL,
     currency_to VARCHAR (3) NOT NULL,
+    pair VARCHAR(6) GENERATED ALWAYS AS (currency_from || currency_to) STORED;
     deferred BOOLEAN DEFAULT FALSE,
 );
+
+ALTER TABLE fx_transaction
+ADD COLUMN currency_rate_id SERIAL;
 
 CREATE TABLE currencies (
     id SERIAL PRIMARY KEY,
@@ -136,8 +115,6 @@ LEFT JOIN
 ON (t1.currency_from = t3.currency)
 ORDER BY date DESC LIMIT 1;
 
-
-
 INSERT INTO
 fx_transaction(
     customer_id,
@@ -146,6 +123,7 @@ fx_transaction(
     amount_to_convert,
     converted,
     rate,
+    currency_rate_id,
     currency_from,
     currency_to) 
 SELECT 
@@ -155,12 +133,13 @@ t3.fee,
 t1.amount - t3.fee AS amount_to_convert,
 (t1.amount - t3.fee) * t2.buy AS converted,
 t2.buy AS buy_rate,
+t2.id AS currency_rate_id,
 t1.currency_from,
 t1.currency_to
 FROM
     (SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction ORDER BY date DESC LIMIT 1) t1
 LEFT JOIN 
-    (SELECT buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+    (SELECT id,buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
 ON (t2.currency_pair = t1.currency_pair)
 LEFT JOIN
     currencies t3
@@ -170,13 +149,13 @@ ORDER BY date DESC LIMIT 1;
 CREATE OR REPLACE FUNCTION fx_conversion() RETURNS TRIGGER AS
 $BODY$
 BEGIN
-    INSERT INTO fx_transaction(transaction_id,customer_id,transaction_amount,fee,amount_to_convert,converted,rate,currency_from,currency_to) 
+    INSERT INTO fx_transaction(transaction_id,customer_id,transaction_amount,fee,amount_to_convert,converted,rate,currency_from,currency_to,currency_rate_id) 
 SELECT 
-t1.id,t1.customer_id,t1.amount,t3.fee,t1.amount - t3.fee AS amount_to_convert,(t1.amount - t3.fee) * t2.buy AS converted,t2.buy AS buy_rate,t1.currency_from,t1.currency_to
+t1.id,t1.customer_id,t1.amount,t3.fee,t1.amount - t3.fee AS amount_to_convert,(t1.amount - t3.fee) * t2.buy AS converted,t2.buy AS buy_rate,t1.currency_from,t1.currency_to, t2.id
 FROM
     (SELECT *,CONCAT(currency_from,currency_to) AS currency_pair FROM customer_transaction ORDER BY date DESC LIMIT 1) t1
 LEFT JOIN 
-    (SELECT buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+    (SELECT id,buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
 ON (t2.currency_pair = t1.currency_pair)
 LEFT JOIN
     currencies t3
@@ -208,12 +187,27 @@ GROUP BY currency_from;
 
 CREATE OR REPLACE VIEW e2_accounts AS
 SELECT
-    currency,
-    cash,
-    customer_liability,
-    revenue,
-    intercompany_payable,
-    -intercompany_payable AS intercompany_receivable
-FROM e1_accounts;
+    currency_from AS currency,
+    SUM(transaction_amount) AS cash,
+    SUM(-amount_to_convert) AS customer_liability,
 
+    SUM(CASE deferred
+        WHEN 'FALSE' THEN -fee
+        END) AS revenue,
+
+    SUM(CASE deferred
+        WHEN 'TRUE' THEN fee 
+        END) AS intercompany_receivable
+
+FROM fx_transaction
+GROUP BY currency_from;
+
+CREATE TABLE fx_ledger (
+    id SERIAL PRIMARY KEY,
+    fx_tran_id SERIAL,
+    date TIMESTAMP NOT NULL DEFAULT NOW(),
+    currency VARCHAR (3),
+    unrealised_fx DECIMAL,
+    realised_fx DECIMAL
+);
 
