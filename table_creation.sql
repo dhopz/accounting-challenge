@@ -190,15 +190,12 @@ SELECT
     currency_from AS currency,
     SUM(transaction_amount) AS cash,
     SUM(-amount_to_convert) AS customer_liability,
-
     SUM(CASE deferred
         WHEN 'FALSE' THEN -fee
         END) AS revenue,
-
     SUM(CASE deferred
         WHEN 'TRUE' THEN fee 
         END) AS intercompany_receivable
-
 FROM fx_transaction
 GROUP BY currency_from;
 
@@ -210,4 +207,51 @@ CREATE TABLE fx_ledger (
     unrealised_fx DECIMAL,
     realised_fx DECIMAL
 );
+
+CREATE OR REPLACE FUNCTION fee_conversion() RETURNS TRIGGER AS
+$BODY$
+BEGIN
+    INSERT INTO fx_ledger(fx_tran_id,currency,realised_fx,rate) 
+SELECT 
+t1.id,
+t1.currency_from,
+CASE t1.currency_from WHEN 'GBP' THEN t3.fee ELSE ROUND(t3.fee * t2.sell,2) END AS fx_realised,
+CASE t1.currency_from WHEN 'GBP' THEN 1 ELSE t2.sell END AS sell_rate
+FROM
+    (SELECT *,CONCAT('GBP',currency_from) AS currency_pair FROM fx_transaction ORDER BY date DESC LIMIT 1) t1
+LEFT JOIN 
+    (SELECT id,buy,sell,currency_pair FROM fx_table ORDER BY date DESC) t2 
+ON (t2.currency_pair = t1.currency_pair)
+LEFT JOIN
+    currencies t3
+ON (t1.currency_from = t3.currency)
+ORDER BY date DESC LIMIT 1;
+RETURN new;
+END;
+$BODY$
+language plpgsql;
+
+CREATE TRIGGER insert_fee_conversion
+     AFTER INSERT ON fx_transaction
+     FOR EACH ROW
+     EXECUTE PROCEDURE fee_conversion();
+
+CREATE OR REPLACE VIEW fx_realised AS
+SELECT SUM(realised_fx) AS realized_fx, 'GBP' AS reporting_currency FROM fx_ledger
+WHERE currency != 'GBP';
+
+CREATE OR REPLACE VIEW fx_accounts AS
+SELECT cash,customer_liability,revenue,intercompany_payable,realized_fx FROM e1_accounts
+INNER JOIN fx_realised
+ON fx_realised.reporting_currency = e1_accounts.currency;
+
+CREATE OR REPLACE VIEW accounts AS
+SELECT                            
+   unnest(array['cash','customer_liability','revenue','intercompany_payable','realized_fx']) AS "Ledger",
+   unnest(array[cash,customer_liability,revenue,intercompany_payable,realized_fx]) AS "GBP"
+FROM fx_accounts;          
+
+
+
+
 
